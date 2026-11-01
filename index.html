@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="用 K 线实时呈现音乐音量起伏的 Web Audio 可视化。">
+    <meta name="theme-color" content="#f6f8f7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0d1310" media="(prefers-color-scheme: dark)">
+    <title>声音可视化</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <canvas id="visualizer" role="img" aria-describedby="visualizer-desc"
+            aria-label="音乐音量 K 线图，点击开始后显示实时数据。"></canvas>
+    <p class="sr-only" id="visualizer-desc">
+        这是一个音乐可视化。每 100 毫秒根据实时音量生成一根 K 线：绿色表示收高，红色表示收低，
+        右侧数字是 0 到 100 的音量指数。按空格键播放或暂停，按 M 键静音，
+        按 U 键或点击上传按钮选择本地音频文件，也可以直接把音频文件拖放到页面上。
+    </p>
+
+    <div class="hud">
+        <section class="metrics" aria-label="实时指标">
+            <div class="metric">
+                <span class="metric-label">当前</span>
+                <strong class="metric-value" id="statCurrent">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-label">较上根</span>
+                <strong class="metric-value" id="statChange" data-trend="flat">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-label">区间最高</span>
+                <strong class="metric-value" id="statHigh">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-label">区间最低</span>
+                <strong class="metric-value" id="statLow">—</strong>
+            </div>
+        </section>
+    </div>
+
+    <div class="bottombar">
+        <div class="meta">
+            <p class="hint" id="hint">歌曲：邦友的酒 (DJ版) · 点击开始</p>
+            <span class="legend" aria-hidden="true">
+                <i class="dot up"></i>上扬
+                <i class="dot down"></i>回落
+            </span>
+            <span class="keys" aria-hidden="true">
+                <kbd>空格</kbd> 播放 / 暂停<span class="sep">·</span><kbd>M</kbd> 静音<span class="sep">·</span><kbd>U</kbd> 上传
+            </span>
+        </div>
+        <div class="controls">
+            <button id="startBtn" type="button" data-state="idle" aria-pressed="false"
+                    aria-keyshortcuts="Space" aria-label="开始可视化">
+                <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 5.4v13.2L18.6 12 8 5.4Z" fill="currentColor"/>
+                </svg>
+                <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="7" y="5" width="3.5" height="14" rx="1.2" fill="currentColor"/>
+                    <rect x="13.5" y="5" width="3.5" height="14" rx="1.2" fill="currentColor"/>
+                </svg>
+                <span id="startLabel">开始</span>
+            </button>
+            <button id="uploadBtn" class="icon-btn" type="button"
+                    aria-keyshortcuts="U" aria-label="上传音频">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 15V4.5"/>
+                    <path d="m7.5 8.5 4.5-4 4.5 4"/>
+                    <path d="M5 15.5v2A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-2"/>
+                </svg>
+            </button>
+            <button id="muteBtn" class="icon-btn" type="button" aria-pressed="false"
+                    aria-keyshortcuts="M" aria-label="静音">
+                <svg class="icon-sound" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 9.5v5h3.2L12 18V6L7.2 9.5H4Z" fill="currentColor" stroke="none"/>
+                    <path d="M15.5 8.5a5 5 0 0 1 0 7"/>
+                    <path d="M18 6a8.5 8.5 0 0 1 0 12"/>
+                </svg>
+                <svg class="icon-mute" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 9.5v5h3.2L12 18V6L7.2 9.5H4Z" fill="currentColor" stroke="none"/>
+                    <path d="m16 9 5 6M21 9l-5 6"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <input type="file" id="audioFile" accept="audio/*" hidden>
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>

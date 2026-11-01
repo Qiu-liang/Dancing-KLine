@@ -1,0 +1,9 @@
+{
+  "name": "music-kline-visualizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "音乐驱动的 K 线可视化：Web Audio 分析实时音量，Canvas 绘制 K 线走势",
+  "scripts": {
+    "start": "npx -y serve ."
+  }
+}
