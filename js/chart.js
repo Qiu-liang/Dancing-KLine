@@ -4,14 +4,13 @@ const BASE_FRAME_MS = 1000 / 60;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-// 价格越界时沿边界镜像反弹，避免长时间运行漂出画面或贴边定格
-const reflect = (value, min, max) => {
-    const range = max - min;
-    // 极端窄窗口下 range 可能为 0，直接返回最小值，避免除零得到 NaN
-    if (!(range > 0)) return min;
-    const period = 2 * range;
-    const t = (((value - min) % period) + period) % period;
-    return t <= range ? min + t : min + period - t;
+// 纵轴刻度步长：从 1 / 2 / 2.5 / 5 × 10ⁿ 里挑一档，让网格条数接近 targetCount
+const niceStep = (raw) => {
+    const value = Math.max(raw, 1e-6);
+    const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+    const normalized = value / magnitude;
+    const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 2.5 ? 2.5 : normalized <= 5 ? 5 : 10;
+    return step * magnitude;
 };
 
 export class CandleChart {
@@ -21,6 +20,9 @@ export class CandleChart {
         this.candles = [];
         this.lastCandleTime = 0;
         this.lastFrameTime = 0;
+        // 纵轴范围：跟随图内实测高低点自动扩张 / 缓慢收缩，不再固定 0..100
+        this.view = { min: 0, max: 100 };
+        this.lastViewAt = 0;
         // 由 main.js 根据顶部 HUD / 底部控制条的实际高度覆盖
         this.padding = { top: 132, right: 56, bottom: 116, left: 0 };
         this.width = 0;
@@ -46,8 +48,8 @@ export class CandleChart {
         this.trim();
     }
 
-    // 价格用 0..100 的音量指数表示，绘图时再映射到屏幕像素，
-    // 因此窗口高度变化时整张图会等比缩放，不会把旧价格留在屏幕外
+    // 价格是音量指数，绘图时按当前纵轴范围映射到屏幕像素，
+    // 因此窗口尺寸变化时整张图会等比缩放，不会把旧价格留在屏幕外
     plotTop() {
         return clamp(this.padding.top, 0, Math.max(0, this.height - 120));
     }
@@ -85,20 +87,86 @@ export class CandleChart {
     valueToY(value) {
         const top = this.plotTop();
         const bottom = this.plotBottom();
-        return bottom - (value / 100) * (bottom - top);
+        const span = this.view.max - this.view.min;
+        // 极端情况下 span 可能为 0，直接返回底部，避免除零得到 NaN
+        if (!(span > 0)) return bottom;
+        return bottom - ((value - this.view.min) / span) * (bottom - top);
     }
 
-    energy(rms) {
-        const normalized = Math.max(0, rms) / config.energyReference;
-        return clamp(Math.pow(normalized, config.energyCurve), 0, 1);
+    // 纵轴范围自适应：目标来自屏幕上可视 K 线的实测最低/最高点。
+    // 快攻击——新极值立刻罩住，K 线不会被裁出绘图区；
+    // 慢释放——范围按真实时间指数收缩，帧率无关，刻度不会来回抖。
+    // 音量指数不为负，底部兜 0；跨度太小时用工整的最小跨度撑开。
+    syncView(now) {
+        const { candles } = this;
+        if (!candles.length) {
+            this.view.min = 0;
+            this.view.max = 100;
+            this.lastViewAt = now;
+            return;
+        }
+
+        // 只拟合屏幕上真正画出来的 K 线，避免滚出画面的旧极值把纵轴撑得过宽
+        const visible = this.visibleCandles();
+        let dataMin = Infinity;
+        let dataMax = -Infinity;
+        for (const candle of visible) {
+            if (candle.low < dataMin) dataMin = candle.low;
+            if (candle.high > dataMax) dataMax = candle.high;
+        }
+
+        const span = dataMax - dataMin;
+        const pad = Math.max(config.viewPadMin, span * config.viewPadRatio);
+        let targetMin = Math.max(0, dataMin - pad);
+        let targetMax = dataMax + pad;
+
+        // 跨度下限：安静段不要放大微小波动，否则满屏都是噪声
+        if (targetMax - targetMin < config.viewMinSpan) {
+            const middle = (targetMin + targetMax) / 2;
+            targetMin = Math.max(0, middle - config.viewMinSpan / 2);
+            targetMax = targetMin + config.viewMinSpan;
+        }
+
+        // 快攻击：先让范围立刻覆盖新极值，随后的收缩项对它没有影响
+        if (targetMax > this.view.max) this.view.max = targetMax;
+        if (targetMin < this.view.min) this.view.min = targetMin;
+
+        // 慢释放：长时间挂起后只做一次有限收缩
+        const dt = this.lastViewAt ? clamp(now - this.lastViewAt, 0, 1000) : 16;
+        this.lastViewAt = now;
+        const kept = Math.exp(-dt / config.viewReleaseTauMs);
+        this.view.max = targetMax + (this.view.max - targetMax) * kept;
+        this.view.min = targetMin + (this.view.min - targetMin) * kept;
+
+        // NaN / 零跨度兜底，避免 valueToY 与刻度生成出错
+        if (!(this.view.max - this.view.min > 0)) {
+            this.view.min = 0;
+            this.view.max = 100;
+        }
     }
 
-    // 每帧调用：rms 为当前音量，now 为 rAF 时间戳（ms）
-    update(rms, now) {
+    // 横向刻度：步长取 1/2/2.5/5×10ⁿ，条数接近 viewTickCount，且都能落在轴范围内
+    axisTicks() {
+        const span = this.view.max - this.view.min;
+        if (!(span > 0)) return [0, 25, 50, 75, 100];
+        const step = niceStep(span / config.viewTickCount);
+        const first = Math.ceil(this.view.min / step);
+        const last = Math.floor(this.view.max / step);
+        const ticks = [];
+        for (let i = first; i <= last; i += 1) ticks.push(i * step);
+        return ticks.length ? ticks : [this.view.min];
+    }
+
+    formatTick(value) {
+        return Number.isInteger(value) ? String(value) : value.toFixed(1);
+    }
+
+    // 每帧调用：energy 为 0..1 的相对能量（响度标定见 auto-range.js），
+    // now 为 rAF 时间戳（ms）
+    update(energy, now) {
         const dt = this.lastFrameTime ? clamp(now - this.lastFrameTime, 1, 64) : BASE_FRAME_MS;
         this.lastFrameTime = now;
 
-        const energy = this.energy(rms);
         const interval = config.candleIntervalMs;
 
         if (!this.candles.length) {
@@ -127,13 +195,13 @@ export class CandleChart {
         if (forcedUp) direction = 1;
 
         const body = config.minBody + energy * config.maxBody;
-        // 轻微回中，避免连续强拍把价格长期顶在边界
+        // 轻微回中，避免连续强拍把价格越推越高；不设上限，纵轴会自动扩张
         const drift = (50 - open) * config.centerPull;
-        let close = reflect(open + drift + direction * body, 0, 100);
+        let close = Math.max(0, open + drift + direction * body);
 
-        // 强拍在顶部被镜像反弹时仍应保持阳线，不能翻红
+        // 强拍仍应保持阳线，不能翻红
         if (forcedUp && close < open) {
-            close = Math.min(100, open + Math.max(config.minBody, body * 0.5));
+            close = open + Math.max(config.minBody, body * 0.5);
         }
 
         const wick = config.wickJitter;
@@ -141,8 +209,8 @@ export class CandleChart {
         this.candles.push({
             open,
             close,
-            high: clamp(Math.max(open, close) + Math.random() * wick, -2, 102),
-            low: clamp(Math.min(open, close) - Math.random() * wick, -2, 102),
+            high: Math.max(open, close) + Math.random() * wick,
+            low: Math.max(0, Math.min(open, close) - Math.random() * wick),
         });
         this.trim();
     }
@@ -160,13 +228,15 @@ export class CandleChart {
             close = last.close + strength * config.burstPull * frameScale;
         }
 
-        close = reflect(close, 0, 100);
+        close = Math.max(0, close);
         last.close = close;
-        last.high = Math.min(102, Math.max(last.high, close));
-        last.low = Math.max(-2, Math.min(last.low, close));
+        last.high = Math.max(last.high, close);
+        last.low = Math.min(last.low, close);
     }
 
-    draw() {
+    draw(now = performance.now()) {
+        // 先按最新数据校正纵轴，保证这一帧的 K 线都落在绘图区内
+        this.syncView(now);
         const { ctx } = this;
         ctx.clearRect(0, 0, this.width, this.height);
         this.drawGrid();
@@ -199,11 +269,14 @@ export class CandleChart {
         }
 
         ctx.strokeStyle = config.colors.axis;
-        for (const value of [0, 25, 50, 75, 100]) {
-            const y = Math.round(this.valueToY(value)) + 0.5;
+        for (const value of this.axisTicks()) {
+            const y = this.valueToY(value);
+            // 浮点误差可能让刻度落在绘图区外，直接跳过
+            if (y < this.plotTop() - 0.5 || y > this.plotBottom() + 0.5) continue;
+            const lineY = Math.round(y) + 0.5;
             ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(right, y);
+            ctx.moveTo(0, lineY);
+            ctx.lineTo(right, lineY);
             ctx.stroke();
         }
         ctx.restore();
@@ -218,9 +291,10 @@ export class CandleChart {
         ctx.font = this.axisFont();
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        for (const value of [100, 75, 50, 25, 0]) {
-            const y = clamp(this.valueToY(value), this.plotTop() + 6, this.plotBottom() - 6);
-            ctx.fillText(String(value), x, y);
+        for (const value of this.axisTicks()) {
+            const y = this.valueToY(value);
+            if (y < this.plotTop() - 0.5 || y > this.plotBottom() + 0.5) continue;
+            ctx.fillText(this.formatTick(value), x, y);
         }
         ctx.restore();
     }
@@ -337,8 +411,8 @@ export class CandleChart {
         return {
             current: last.close,
             change: last.close - (previous ? previous.close : last.open),
-            high: clamp(high, 0, 100),
-            low: clamp(low, 0, 100),
+            high,
+            low,
             up,
             down,
             count: visible.length,

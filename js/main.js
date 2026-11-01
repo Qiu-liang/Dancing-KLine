@@ -1,6 +1,7 @@
 import { config, refreshColors } from './config.js';
 import { createAudioEngine } from './audio-engine.js';
 import { createSongTrack } from './song-track.js';
+import { createAutoRange } from './auto-range.js';
 import { CandleChart } from './chart.js';
 
 // 工作区内的歌曲文件，循环播放并驱动 K 线
@@ -33,6 +34,8 @@ let muted = readMuted();
 
 refreshColors();
 const chart = new CandleChart(canvas);
+// 响度范围自适应：换曲时 reset 重新标定
+const autoRange = createAutoRange(config);
 
 let engine = null;
 let track = null;
@@ -144,7 +147,7 @@ function loop(time) {
         return;
     }
 
-    chart.update(engine.level(), time);
+    chart.update(autoRange.normalize(engine.level(), time), time);
 
     // 合成音轨才有随机 blip，歌曲音轨直接跟唱
     if (track.blip && time >= nextBlipAt) {
@@ -152,7 +155,7 @@ function loop(time) {
         nextBlipAt = time + config.blipMinMs + Math.random() * (config.blipMaxMs - config.blipMinMs);
     }
 
-    chart.draw();
+    chart.draw(time);
 
     if (time - lastStatsAt >= 100) {
         lastStatsAt = time;
@@ -167,6 +170,7 @@ function togglePlayback() {
         try {
             engine = createAudioEngine({ muted });
             track = createSongTrack(engine.audioCtx, engine.analyser, { src: objectUrl ?? SONG_SRC });
+            autoRange.reset();
             // 在用户手势调用栈内同步 play()，绕过浏览器自动播放限制
             Promise.resolve(track.start()).catch((error) => {
                 console.error(error);
@@ -251,7 +255,10 @@ function handleAudioFile(file) {
 
     // 播放中无缝切换，暂停中只加载（保持暂停）
     Promise.resolve(track.setSource(objectUrl))
-        .then(syncPlaybackUI)
+        .then(() => {
+            autoRange.reset(); // 新歌重新标定响度范围
+            syncPlaybackUI();
+        })
         .catch((error) => {
             console.error(error);
             hintEl.textContent = '音频解码失败，请换一个文件试试';

@@ -19,7 +19,7 @@ python3 -m http.server 8080
 ## 界面与操作
 
 - **顶部 HUD**：当前音量指数、较上根变化、当前可视区间的最高/最低值；状态标签显示「待启动 / 播放中 / 已暂停」。
-- **主图**：固定 0–100 的音量指数坐标轴、网格、右侧最新价标签（虚线 + 数值），以及绿色上扬 / 红色回落的 K 线。
+- **主图**：自适应范围的音量指数坐标轴（跟随歌曲响度伸缩，可超过 100）、网格、右侧最新价标签（虚线 + 数值），以及绿色上扬 / 红色回落的 K 线。
 - **底部控制**：播放 / 暂停、静音。静音只关闭扬声器输出，分析链路继续工作，所以画面仍然会动。
 - **快捷键**：`空格` 播放 / 暂停，`M` 静音。
 - 跟随系统深浅色主题；静音偏好写入 `localStorage`。
@@ -38,17 +38,18 @@ music-kline-visualizer/
     ├── config.js       # 能量映射、K 线尺寸、阈值、配色（读自 CSS 变量）
     ├── audio-engine.js # AudioContext + AnalyserNode + 输出增益/静音、RMS 平滑
     ├── song-track.js   # 歌曲音轨：<audio> 解码本地 MP3 汇入分析器
+    ├── auto-range.js   # 响度范围自适应：min-max 归一化（快攻击/慢释放/跨度下限）
     ├── demo-track.js   # 内置合成演示音轨与随机五声音阶 blip（备用）
-    └── chart.js        # 0–100 音量指数 K 线、Canvas 绘制、坐标轴与最新价
+    └── chart.js        # 音量指数 K 线、自适应纵轴、Canvas 绘制与最新价
 ```
 
 ## K 线生成规则
 
 - 每 `candleIntervalMs`（100ms）收一根新 K 线，开盘价 = 上一根收盘价。
-- 音量先换算成 `0..1` 的能量：`(rms / energyReference) ^ energyCurve`，再映射成实体高度 `minBody + energy × maxBody`（单位是 0–100 的价格指数）。
+- 音量先由 `auto-range.js` 自适应归一化：跟踪当前歌曲实际观测到的最高/最低响度做 min-max 归一化（快攻击 + 慢释放 + 跨度下限，换曲自动重标定），得到 `0..1` 的相对能量，再经 `energyCurve` 整形、映射成实体高度 `minBody + energy × maxBody`（单位是音量指数）。任何响度的歌曲都会自动铺满可用的能量区间。
 - 收盘方向默认 52% 概率向上；能量超过 `forceUpThreshold` 时强制收阳；超过 `burstThreshold` 时，未收盘 K 线在每帧继续上冲。
 - 未收盘的 K 线每帧小幅抖动；抖动和上冲都按帧间隔换算，60Hz / 120Hz 屏幕下表现一致。
-- 价格越界时沿边界镜像反弹，并带一点回中力，长时间运行不会漂出画面或长期贴边。
+- 价格不再封顶：响度上来时 K 线可以突破 100，纵轴范围随之扩张（默认上限大约到 120–140），安静段落按 `viewReleaseTauMs` 缓慢收回；底部兜 0，回中力避免长时间漂高。
 - 宽高变化时价格会按比例重新映射，不会出现旧价格留在屏幕外的情况。
 
 ## 可调参数
@@ -57,8 +58,10 @@ music-kline-visualizer/
 
 | 参数 | 作用 |
 | --- | --- |
-| `energyReference` / `energyCurve` | RMS → 能量曲线的标定；换成麦克风或其他音源时优先调这两个 |
-| `minBody` / `maxBody` | K 线实体高度的下限 / 上限（0–100 指数单位） |
+| `energyCurve` / `rangeMinSpan` / `rangeReleaseTauMs` | 自适应能量映射：歌内安静段整形、归一化跨度下限、范围收缩时间常数 |
+| `viewMinSpan` / `viewPadRatio` / `viewPadMin` | 纵轴最小跨度、上下留白比例与最小留白 |
+| `viewReleaseTauMs` / `viewTickCount` | 纵轴收缩时间常数、目标网格条数 |
+| `minBody` / `maxBody` | K 线实体高度的下限 / 上限（音量指数单位） |
 | `forceUpThreshold` / `burstThreshold` | 强制收阳 / 盘中上冲的能量阈值 |
 | `upProbability` / `centerPull` | 基础收阳概率 / 回中力度 |
 | `candleIntervalMs` | 每根 K 线的时间跨度 |
@@ -78,3 +81,4 @@ music-kline-visualizer/
 - **帧率相关的抖动**：未收盘 K 线的抖动与上冲按 `dt` 换算，高刷屏和低帧率下节奏一致。
 - **主题切换**：Canvas 颜色会在 `prefers-color-scheme` 变化时重新读取 CSS 变量，避免 DOM 换色而图表不换色。
 - **前端表现**：新增坐标轴 / 最新价标签 / 实时指标 / 图例 / 状态标签 / 键盘操作 / 深色模式 / 响应式与 reduced-motion 支持；画布与控件的配色、层级和可读性也做了统一。
+- **价格封顶**：价格原来被硬限制在 0–100 并沿边界镜像反弹，响的段落会一直顶在 100。现在纵轴范围跟随可视 K 线的实测最高/最低点自动扩张、安静段再缓慢收缩，K 线可以突破 100（实测默认曲目大约到 120–140），刻度与 HUD 取值也随之动态变化。
